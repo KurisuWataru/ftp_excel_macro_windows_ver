@@ -1,0 +1,3 @@
+*.bas text working-tree-encoding=shift_jis
+*.cls text working-tree-encoding=shift_jis
+*.frm text working-tree-encoding=shift_jis 

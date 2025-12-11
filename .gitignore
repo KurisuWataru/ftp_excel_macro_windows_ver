@@ -1,0 +1,15 @@
+# 設定ファイル（認証情報を含むため）
+config.ps1
+
+# ログファイル
+*.log
+
+# 実行スクリプト
+main_process.ps1
+
+# 設定ファイル
+config.ps1
+
+# Excelの一時ファイル
+~$*.xlsx
+~$*.xlsm
