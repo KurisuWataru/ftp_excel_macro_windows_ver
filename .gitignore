@@ -13,3 +13,7 @@ config.ps1
 # Excelの一時ファイル
 ~$*.xlsx
 ~$*.xlsm
+
+# ログファイル
+display_log.txt
+WinSCP.log
