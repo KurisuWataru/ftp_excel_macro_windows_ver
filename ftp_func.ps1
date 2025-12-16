@@ -1,9 +1,12 @@
-﻿# ================================
-# WinSCP.NET FTPアップロード自動化
-# ================================
+﻿<# 
+========================================
+ WinSCP.NET FTPアップロード自動化（共通ライブラリ）
+========================================
+#>
 
-# このファイルは共通処理ライブラリとして使用されます
-# 直接実行する場合は main_process.ps1 を使用してください
+# ------------------------------------------------------------
+# 直接実行はNG（ライブラリとして dot-source される前提）
+# ------------------------------------------------------------
 if ((Split-Path $MyInvocation.InvocationName -Leaf) -eq $MyInvocation.MyCommand.Name) {
     Write-Host "このファイルは共通処理ライブラリです。" -ForegroundColor Yellow
     Write-Host "FTP処理を実行するには main_process.ps1 を使用してください。" -ForegroundColor Yellow
@@ -11,61 +14,108 @@ if ((Split-Path $MyInvocation.InvocationName -Leaf) -eq $MyInvocation.MyCommand.
     exit 0
 }
 
-# 初期化エラーフラグ
-$script:InitializationError = $false
+#region 初期化（設定読み込み / DLLロード / グローバル状態）
 
-# 設定ファイルの読み込み
-$configPath = "$PSScriptRoot\config.ps1"
+# 初期化エラーフラグ（main_process.ps1 側でチェックされます）
+$script:InitializationError = $false
+$InitializationError = $false
+
+function Write-Info {
+    param([string]$message)
+    Write-Host $message
+}
+
+function Write-Warn {
+    param([string]$message)
+    Write-Host $message -ForegroundColor Yellow
+}
+
+function Write-Err {
+    param([string]$message)
+    Write-Host $message -ForegroundColor Red
+}
+
+function Initialize-ResultState {
+    <#
+    処理結果（成功/失敗など）を格納する変数を初期化します。
+    これらは main_process.ps1 の finally ブロックで集計表示に使われます。
+    #>
+
+    # 処理結果集計用の配列
+    $script:BackupSuccess   = @()
+    $script:BackupFailed    = @()
+    $script:BackupNotNeeded = @()
+    $script:UploadSuccess   = @()
+    $script:UploadFailed    = @()
+
+    # 個別ファイルの結果を記録するための辞書（キーは localBasePath）
+    $script:UploadSuccessFiles = @{}
+    $script:UploadFailedFiles = @{}
+
+    # バッチエラー（QueryReceived / FileTransferProgress）で拾ったローカル側失敗ファイルパスを一時保持
+    # ※イベントハンドラから参照するため global を使用
+    $global:BatchErrorFiles = @{}
+}
+
+function Import-WinScpDll {
+    <#
+    WinSCP.NET.dll をロードします。
+    ※ config.ps1 の読み込みは「必ずスクリプト直下（関数の外）」で行います。
+       （関数内で dot-source すると、その変数が関数スコープに閉じてしまい、
+        `$ftpHost` 等が後続処理で見えなくなるため）
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$dllPath
+    )
+
+    if (-not (Test-Path $dllPath)) {
+        Write-Err "WinSCP.NET.dll が見つかりません: $dllPath"
+        Write-Info "WinSCP.NET.dll をダウンロードして、指定したパスに配置してください。"
+        $script:InitializationError = $true
+        $InitializationError = $true
+        return
+    }
+
+    try {
+        Add-Type -Path $dllPath
+    } catch {
+        Write-Err "WinSCP.NET.dll の読み込みに失敗しました: $_"
+        $script:InitializationError = $true
+        $InitializationError = $true
+        return
+    }
+}
+
+# 初期化を実行
+Initialize-ResultState
+
+# 設定ファイルの読み込み（スクリプトスコープで dot-source するのが重要）
+$configPath = Join-Path $PSScriptRoot "config.ps1"
 if (-not (Test-Path $configPath)) {
-    Write-Host "設定ファイルが見つかりません: $configPath" -ForegroundColor Red
-    Write-Host "エクセルマクロでconfig.ps1を作成してください。"
+    Write-Err "設定ファイルが見つかりません: $configPath"
+    Write-Info "エクセルマクロで config.ps1 を作成してください。"
     $script:InitializationError = $true
+    $InitializationError = $true
     return
 }
 . $configPath
 
-# WinSCP.NET.dllの読み込み
-if (-not (Test-Path $winscpDllPath)) {
-    Write-Host "WinSCP.NET.dllが見つかりません: $winscpDllPath" -ForegroundColor Red
-    Write-Host "WinSCP.NET.dllをダウンロードしてスクリプトと同じフォルダに配置してください。"
-    $script:InitializationError = $true
+Import-WinScpDll -dllPath $winscpDllPath
+if ($script:InitializationError -or $InitializationError) {
+    # DLLロードに失敗した場合は、ここで止めます（後続の WinSCP 型参照で追加エラーを出さないため）
     return
 }
 
-try {
-    Add-Type -Path $winscpDllPath
-} catch {
-    Write-Host "WinSCP.NET.dllの読み込みに失敗しました: $_" -ForegroundColor Red
-    $script:InitializationError = $true
-    return
-}
+# ログファイルのパスを設定（main_process.ps1 が参照）
+$LOG_PATH = Join-Path $PSScriptRoot "WinSCP.log"
 
-# ログファイルのパスを設定
-$LOG_PATH = "$PSScriptRoot\WinSCP.log"
 # バックアップフォルダのパスを設定（設定ファイルから読み込み）
 $BACKUP_PATH = $backupPath
 
-# ========================================
-# グローバル変数の初期化
-# ========================================
+#endregion 初期化
 
-# 処理結果集計用の配列
-$script:BackupSuccess   = @()
-$script:BackupFailed    = @()
-$script:BackupNotNeeded = @()
-$script:UploadSuccess   = @()
-$script:UploadFailed    = @()
-
-# 個別ファイルの結果を記録するための辞書
-$script:UploadSuccessFiles = @{}
-$script:UploadFailedFiles = @{}
-
-# バッチエラー（QueryReceived）で拾ったローカル側の失敗ファイルの絶対パスを一時保持
-$global:BatchErrorFiles = @{}
-
-# ========================================
-# ユーティリティ関数
-# ========================================
+#region ユーティリティ（初心者が追いやすい小さな部品）
 
 # ファイル・フォルダの権限を設定する関数
 # ファイル: 664 (rw-rw-r--), フォルダ: 775 (rwxrwxr-x)
@@ -78,39 +128,44 @@ function Set-RemoteFilePermissions {
     )
     
     try {
-        # リモートパスの情報を取得
+        # リモートパスが「ファイル」か「フォルダ」かを判定します
         $fileInfo = $session.GetFileInfo($remotePath)
-        
+
         if ($fileInfo.IsDirectory) {
-            # フォルダの場合
+            # -----------------------------
+            # フォルダの場合：chmod → 中身も再帰
+            # -----------------------------
             Write-Host "フォルダ権限を設定中: $remotePath ($folderPermission)"
+
             $chmodCommand = "SITE CHMOD $folderPermission $remotePath"
             $result = $session.ExecuteCommand($chmodCommand)
-            
+
             if ($result.IsSuccess) {
                 Write-Host "  ✓ フォルダ権限設定完了: $remotePath" -ForegroundColor Green
             } else {
                 Write-Host "  ✗ フォルダ権限設定失敗: $remotePath - $($result.ErrorOutput)" -ForegroundColor Yellow
             }
-            
-            # フォルダ内のファイル・サブフォルダの権限も再帰的に設定
+
+            # フォルダ内のファイル・サブフォルダの権限も設定（失敗しても処理は継続）
             try {
                 $remoteFiles = $session.ListDirectory($remotePath)
                 foreach ($file in $remoteFiles.Files) {
-                    if ($file.Name -ne "." -and $file.Name -ne "..") {
-                        $childPath = "$remotePath/$($file.Name)" -replace "//", "/"
-                        Set-RemoteFilePermissions -remotePath $childPath -session $session -filePermission $filePermission -folderPermission $folderPermission
-                    }
+                    if ($file.Name -eq "." -or $file.Name -eq "..") { continue }
+                    $childPath = ("$remotePath/$($file.Name)" -replace "//", "/")
+                    Set-RemoteFilePermissions -remotePath $childPath -session $session -filePermission $filePermission -folderPermission $folderPermission
                 }
             } catch {
-                Write-Host "  警告: サブフォルダの権限設定でエラー: $_" -ForegroundColor Yellow
+                Write-Warn "  警告: サブフォルダの権限設定でエラー: $_"
             }
         } else {
-            # ファイルの場合
+            # -----------------------------
+            # ファイルの場合：chmod のみ
+            # -----------------------------
             Write-Host "ファイル権限を設定中: $remotePath ($filePermission)"
+
             $chmodCommand = "SITE CHMOD $filePermission $remotePath"
             $result = $session.ExecuteCommand($chmodCommand)
-            
+
             if ($result.IsSuccess) {
                 Write-Host "  ✓ ファイル権限設定完了: $remotePath" -ForegroundColor Green
             } else {
@@ -118,7 +173,7 @@ function Set-RemoteFilePermissions {
             }
         }
     } catch {
-        Write-Host "  ✗ 権限設定エラー: $remotePath - $_" -ForegroundColor Yellow
+        Write-Warn "  ✗ 権限設定エラー: $remotePath - $_"
     }
 }
 
@@ -146,6 +201,94 @@ function Get-FilePathFromErrorMessage {
         return $matches[1]
     }
     return $null
+}
+
+function Read-YesNo {
+    <#
+    yes/no の入力を安全に受け取るための共通関数です。
+    戻り値: $true (yes), $false (no)
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$message
+    )
+
+    do {
+        Write-Host $message -ForegroundColor Yellow -NoNewline
+        $userResponse = $Host.UI.ReadLine().ToLower()
+
+        if ($userResponse -eq "yes" -or $userResponse -eq "y") { return $true }
+        if ($userResponse -eq "no" -or $userResponse -eq "n") { return $false }
+
+        Write-Host "無効な入力です。'yes' または 'no' を入力してください。" -ForegroundColor Red
+    } while ($true)
+}
+
+function New-TransferOptions {
+    <#
+    WinSCP の転送オプションを生成します。
+    現状はバイナリ転送固定（テキスト/改行変換を避けるため）です。
+    #>
+    $transferOptions = New-Object WinSCP.TransferOptions
+    $transferOptions.TransferMode = [WinSCP.TransferMode]::Binary
+    return $transferOptions
+}
+
+function ConvertTo-UnixPath {
+    <#
+    Windows の \ を / に変換し、// のような重複を潰します。
+    #>
+    param([Parameter(Mandatory)][string]$path)
+    return (($path -replace "\\", "/") -replace "//+", "/")
+}
+
+function Get-RemoteParentDirectory {
+    <#
+    リモートファイルの「親フォルダ」を取得します（Unixスラッシュで返す）。
+    例: /common/css/style.css → /common/css
+    #>
+    param([Parameter(Mandatory)][string]$remotePath)
+
+    $parent = ConvertTo-UnixPath -path (Split-Path $remotePath -Parent)
+    if (-not $parent.StartsWith('/')) { $parent = '/' + $parent }
+    return $parent
+}
+
+function Move-SessionToRootDirectory {
+    <#
+    WinSCP セッションのカレントディレクトリを / に移動します。
+    相対パス解釈の事故を防ぐため、処理の前に毎回呼ぶ方針です。
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [WinSCP.Session]$session
+    )
+    $null = $session.ExecuteCommand("CWD /")
+}
+
+function Get-AndClearBatchErrorFilePaths {
+    <#
+    main_process.ps1 側のイベントで収集している「転送前に弾かれたパス」を取得してクリアします。
+    - 戻り値: パス文字列の配列（無ければ空配列）
+    #>
+    if (-not $global:BatchErrorFiles) { return @() }
+    $paths = @($global:BatchErrorFiles.Keys)
+    $global:BatchErrorFiles = @{}
+    return $paths
+}
+
+function Get-UploadedRemotePath {
+    <#
+    アップロード先のリモートパス（chmod 対象）を計算します。
+    PutFiles() の仕様上、ファイルでもフォルダでも「末尾要素（Leaf）」を childPath 配下に作るため、
+    単純に `$normalizedChildPath/$leaf` で統一できます。
+    #>
+    param(
+        [Parameter(Mandatory)][string]$normalizedChildPath,
+        [Parameter(Mandatory)][string]$localPath
+    )
+    $leaf = Split-Path $localPath -Leaf
+    return ("$normalizedChildPath/$leaf" -replace "//", "/")
 }
 
 # 失敗ファイルを記録する共通関数
@@ -187,14 +330,18 @@ function Add-SuccessFile {
     return $true
 }
 
-# ========================================
-# WinSCPセッションオプションの初期化
-# ========================================
+#endregion ユーティリティ
+
+#region WinSCPセッションオプション（main_process.ps1 が利用）
 
 function Initialize-WinSCPSession {
+    <#
+    WinSCP への接続情報（SessionOptions）を作成します。
+    main_process.ps1 では `$session.Open($sessionOptions)` として使用します。
+    #>
     Write-Host "スクリプト実行開始: $(Get-Date)"
-    
-    # WinSCPセッションオプションの設定
+
+    # WinSCP セッションオプションの設定
     $sessionOptions = New-Object WinSCP.SessionOptions
     $sessionOptions.Protocol = [WinSCP.Protocol]::Ftp
     $sessionOptions.HostName = $ftpHost
@@ -210,40 +357,52 @@ function Initialize-WinSCPSession {
 # セッションオプションを初期化
 $sessionOptions = Initialize-WinSCPSession
 
-#関数を宣言
+#endregion WinSCPセッションオプション
+
+#region メインAPI（外部から呼ばれる関数）
+
+# -----------------------------------------------------------------
+# 互換性のため `action` という関数名を維持しています。
+# Excelマクロ(main.bas) / main_process.ps1 からこの名前で呼ばれます。
+# -----------------------------------------------------------------
 function action {
     param (
-        [string]$remotePath,
-        [string]$localPath,
-        [bool]$deleteAfterBackup = $false,
-        [WinSCP.Session]$session
+        [Parameter(Mandatory)][string]$remotePath,
+        [Parameter(Mandatory)][string]$localPath,
+        [Parameter(Mandatory)][bool]$deleteAfterBackup,
+        [Parameter(Mandatory)][WinSCP.Session]$session
     )
 
-    # リモートパスのディレクトリ部分（Unix スラッシュ維持）を取得
-    $childPath = (
-        (Split-Path $remotePath -Parent) -replace "\\", "/"
-    )
-    if (-not $childPath.StartsWith('/')) {
-        # 先頭にスラッシュが無い場合は追加（絶対パス化）
-        $childPath = '/' + $childPath
-    }
-    
-    Backup-RemoteFile $remotePath $childPath $deleteAfterBackup $session
-    Upload-LocalFile $localPath $childPath $session
+    <#
+    処理の流れ：
+    1) リモート側の既存ファイルをバックアップ（あれば）
+    2) ローカルファイル/フォルダをアップロード
+    #>
+
+    $remoteParentDir = Get-RemoteParentDirectory -remotePath $remotePath
+
+    Backup-RemoteFile -remotePath $remotePath -childPath $remoteParentDir -deleteAfterBackup $deleteAfterBackup -session $session
+    Upload-LocalFile -localPath $localPath -childPath $remoteParentDir -session $session
 }
+
+#endregion メインAPI
+
+#region バックアップ（リモート→ローカル）
 
 function Backup-RemoteFile {
     param (
-        [string]$remotePath,
-        [string]$childPath,
-        [bool]$deleteAfterBackup = $false,
-        [WinSCP.Session]$session
+        [Parameter(Mandatory)][string]$remotePath,
+        [Parameter(Mandatory)][string]$childPath,
+        [Parameter(Mandatory)][bool]$deleteAfterBackup,
+        [Parameter(Mandatory)][WinSCP.Session]$session
     )
-    # 明示的にルートディレクトリに移動
-    $null = $session.ExecuteCommand("CWD /")
+
+    # 念のため、明示的にルートディレクトリに移動（相対パス事故を防止）
+    Move-SessionToRootDirectory -session $session
     Write-Host "リモートのファイルの存在を確認: $remotePath"
     
     try {
+        # ここで GetFileInfo が成功すれば、対象が存在する（ファイル/フォルダ）
         $fileInfo = $session.GetFileInfo($remotePath)
         Write-Host "リモートのファイルのバックアップを取得: $remotePath"
         
@@ -252,8 +411,7 @@ function Backup-RemoteFile {
             New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
         }
         
-        $transferOptions = New-Object WinSCP.TransferOptions
-        $transferOptions.TransferMode = [WinSCP.TransferMode]::Binary
+        $transferOptions = New-TransferOptions
         
         $transferResult = $session.GetFiles($remotePath, "$backupDir\", $False, $transferOptions)
         
@@ -261,35 +419,17 @@ function Backup-RemoteFile {
             $script:BackupSuccess += $remotePath
             Write-Host "バックアップ成功: $remotePath"
 
-            # バックアップ成功後、削除フラグがtrueの場合はリモートファイル/フォルダを削除
+            # バックアップ成功後、削除フラグが true の場合は「確認してから」削除します
             if ($deleteAfterBackup) {
                 try {
-                    # 削除実行の確認
-                    do {
-                        Write-Host "バックアップ対象 '$remotePath' を削除しますか？ (yes/no): " -ForegroundColor Yellow -NoNewline
-                        $userResponse = $Host.UI.ReadLine().ToLower()
+                    $shouldDelete = Read-YesNo -message "バックアップ対象 '$remotePath' を削除しますか？ (yes/no): "
+                    if (-not $shouldDelete) {
+                        Write-Warn "削除をスキップします。バックアップは完了しました。"
+                        return
+                    }
 
-                        if ($userResponse -eq "yes" -or $userResponse -eq "y") {
-                            Write-Host "削除を実行します。" -ForegroundColor Green
-                            break
-                        }
-                        elseif ($userResponse -eq "no" -or $userResponse -eq "n") {
-                            Write-Host "削除をスキップします。" -ForegroundColor Yellow
-                            Write-Host "バックアップは完了しましたが、削除は実行されませんでした。" -ForegroundColor Cyan
-                            return
-                        }
-                        else {
-                            Write-Host "無効な入力です。'yes'または'no'を入力してください。" -ForegroundColor Red
-                        }
-                    } while ($true)
-
-                    Write-Host "バックアップ対象を削除: $remotePath"
-
-                    # リモートパスがファイルかフォルダかを判定
-                    $fileInfo = $session.GetFileInfo($remotePath)
-
-                    # ファイルとフォルダの両方にRemoveFilesを使用（より信頼性が高い）
-                    Write-Host "対象を削除: $remotePath"
+                    # ファイルとフォルダの両方に RemoveFiles を使用（WinSCP的に扱いやすい）
+                    Write-Host "対象を削除: $remotePath" -ForegroundColor Yellow
                     try {
                         $removalResult = $session.RemoveFiles($remotePath)
 
@@ -300,7 +440,7 @@ function Backup-RemoteFile {
                                 Write-Host "ファイル削除成功: $remotePath" -ForegroundColor Yellow
                             }
 
-                            # 削除結果の検証（オプション）
+                            # 削除結果の検証（存在確認。無ければ例外になる）
                             try {
                                 $verifyInfo = $session.GetFileInfo($remotePath)
                                 Write-Host "警告: 削除後もファイル/フォルダがまだ存在しています" -ForegroundColor Yellow
@@ -358,12 +498,31 @@ function Backup-RemoteFile {
     }
 }
 
+#endregion バックアップ
+
+#region アップロード（ローカル→リモート）
+
 # フォルダアップロードの結果を処理する関数
 function Process-DirectoryUploadResult {
     param (
         [string]$localPath,
         [object]$transferResult
     )
+    
+    <#
+    PutFiles() の戻り値（TransferOperationResult）を見て、
+    - どのファイルが成功したか
+    - どのファイルが失敗したか
+    を「1ファイル単位」で集計します。
+
+    WinSCP の結果は主に2種類あります：
+    - Transfers : 実際に転送を試みた各ファイルの結果（成功なら Error が null）
+    - Failures  : まとめて実行したときに Transfers だけでは拾えない失敗
+
+    さらに main_process.ps1 側のイベント（QueryReceived / FileTransferProgress）で
+    「転送前に弾かれたパス」を $global:BatchErrorFiles に貯めているため、
+    それもここで失敗として補完します。
+    #>
     
     $successCount = 0
     $failureCount = 0
@@ -395,14 +554,12 @@ function Process-DirectoryUploadResult {
         }
     }
 
-    # QueryReceived で拾った失敗を補完
-    if ($global:BatchErrorFiles.Keys.Count -gt 0) {
-        foreach ($absPath in $global:BatchErrorFiles.Keys) {
-            if (Add-FailedFile -localBasePath $localPath -filePath $absPath -errorMessage "転送前エラーにより転送されませんでした") {
-                $failureCount++
-            }
+    # QueryReceived / FileTransferProgress で拾った失敗を補完（取得とクリアを共通化）
+    $batchErrorPaths = Get-AndClearBatchErrorFilePaths
+    foreach ($absPath in $batchErrorPaths) {
+        if (Add-FailedFile -localBasePath $localPath -filePath $absPath -errorMessage "転送前エラーにより転送されませんでした") {
+            $failureCount++
         }
-        $global:BatchErrorFiles = @{}
     }
     
     # フォルダ全体の結果を判定
@@ -426,6 +583,16 @@ function Process-SingleFileUploadResult {
         [object]$transferResult
     )
     
+    <#
+    単一ファイル PutFiles() の結果を、最終的に
+    - 成功（UploadSuccess）
+    - 失敗（UploadFailed）
+    のどちらに入れるか判定します。
+
+    注意：WinSCP は「IsSuccess が False」でも部分的に Transfers が成功している場合があります。
+    そのため、Transfers と Failures の両方を見て判定しています。
+    #>
+
     $hasErrors = $false
     $hasSuccessfulTransfer = $false
     
@@ -452,17 +619,11 @@ function Process-SingleFileUploadResult {
         }
     }
     
-    # QueryReceived で拾った失敗をチェック
-    if ($global:BatchErrorFiles.Keys.Count -gt 0) {
-        foreach ($absPath in $global:BatchErrorFiles.Keys) {
-            # 現在のlocalPathと一致するかチェック
-            if ($absPath -eq $localPath) {
-                $hasErrors = $true
-                Write-Host "  エラー: 転送前エラーにより転送されませんでした" -ForegroundColor Red
-            }
-        }
-        # バッチエラーをクリア
-        $global:BatchErrorFiles = @{}
+    # QueryReceived / FileTransferProgress で拾った失敗をチェック（取得とクリアを共通化）
+    $batchErrorPaths = Get-AndClearBatchErrorFilePaths
+    if ($batchErrorPaths -contains $localPath) {
+        $hasErrors = $true
+        Write-Host "  エラー: 転送前エラーにより転送されませんでした" -ForegroundColor Red
     }
     
     # 転送されたファイルが1つもない場合もエラーとみなす
@@ -488,21 +649,29 @@ function Process-SingleFileUploadResult {
 
 function Upload-LocalFile {
     param (
-        [string]$localPath,
-        [string]$childPath,
-        [WinSCP.Session]$session
+        [Parameter(Mandatory)][string]$localPath,
+        [Parameter(Mandatory)][string]$childPath,
+        [Parameter(Mandatory)][WinSCP.Session]$session
     )
     
+    <#
+    ローカル側のパス（ファイル/フォルダ）を、指定リモートディレクトリにアップロードします。
+
+    処理の流れ：
+    1) PutFiles() 実行
+    2) 結果を解析して成功/失敗を集計
+    3) 成功したものがあれば、アップロード先に chmod（権限設定）
+    #>
+
     Write-Host "ローカルのファイルをアップロード: $localPath"
     
     try {
-        # 明示的にルートディレクトリに移動
-        $null = $session.ExecuteCommand("CWD /")
-        $transferOptions = New-Object WinSCP.TransferOptions
-        $transferOptions.TransferMode = [WinSCP.TransferMode]::Binary
+        # 念のため、明示的にルートディレクトリに移動（相対パス事故を防止）
+        Move-SessionToRootDirectory -session $session
+        $transferOptions = New-TransferOptions
         
         # リモートパスの末尾スラッシュを正規化（重複スラッシュ防止）
-        $normalizedChildPath = ($childPath -replace '/+$','')
+        $normalizedChildPath = (ConvertTo-UnixPath -path $childPath) -replace '/+$',''
         $transferResult = $session.PutFiles($localPath, "$normalizedChildPath/", $False, $transferOptions)
         
         # フォルダかファイルかを判定して適切な処理関数を呼び出し
@@ -519,22 +688,14 @@ function Upload-LocalFile {
         if ($hasSuccessfulTransfers) {
             Write-Host "アップロード完了。権限を設定中..."
             
-            # アップロード先のリモートパスを計算
-            $uploadedRemotePath = if ($isDirectory) {
-                # ディレクトリの場合、パス名を追加
-                $localDirName = Split-Path $localPath -Leaf
-                "$normalizedChildPath/$localDirName" -replace "//", "/"
-            } else {
-                # ファイルの場合、ファイル名を追加
-                $localFileName = Split-Path $localPath -Leaf
-                "$normalizedChildPath/$localFileName" -replace "//", "/"
-            }
+            # アップロード先のリモートパスを計算（chmod 対象）
+            $uploadedRemotePath = Get-UploadedRemotePath -normalizedChildPath $normalizedChildPath -localPath $localPath
             
             # 権限設定を実行（エラーがあっても処理を継続）
             try {
                 Set-RemoteFilePermissions -remotePath $uploadedRemotePath -session $session
             } catch {
-                Write-Host "  警告: 権限設定でエラーが発生しましたが、処理を継続します: $_" -ForegroundColor Yellow
+                Write-Warn "  警告: 権限設定でエラーが発生しましたが、処理を継続します: $_"
             }
         } else {
             Write-Host "アップロードが完全に失敗したため、権限設定をスキップします。" -ForegroundColor Yellow
@@ -545,4 +706,4 @@ function Upload-LocalFile {
     }
 }
 
-
+#endregion アップロード
