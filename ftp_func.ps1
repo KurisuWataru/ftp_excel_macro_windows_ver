@@ -482,6 +482,23 @@ function Process-SingleFileUploadResult {
 
 #region ユーティリティ（上の処理が内部で使う部品）
 
+function Get-CommandErrorDetail {
+    <#
+    ExecuteCommand の結果から ErrorOutput / Output を確認し、エラー原因文字列を返します。
+    両方空の場合は「原因不明」を返します。
+    #>
+    param([Parameter(Mandatory)][object]$result)
+
+    $errorDetail = if ($result.ErrorOutput) {
+        $result.ErrorOutput.Trim()
+    } elseif ($result.Output) {
+        $result.Output.Trim()
+    } else {
+        "原因不明"
+    }
+    return $errorDetail
+}
+
 # ファイル・フォルダの権限を設定する関数
 # ファイル: 664 (rw-rw-r--), フォルダ: 775 (rwxrwxr-x)
 function Set-RemoteFilePermissions {
@@ -508,7 +525,8 @@ function Set-RemoteFilePermissions {
             if ($result.IsSuccess) {
                 Write-Host "  ✓ フォルダ権限設定完了: $remotePath" -ForegroundColor Green
             } else {
-                Write-Host "  ✗ フォルダ権限設定失敗: $remotePath - $($result.ErrorOutput)" -ForegroundColor Yellow
+                $errorDetail = Get-CommandErrorDetail -result $result
+                Write-Host "  ✗ フォルダ権限設定失敗: $remotePath - $errorDetail" -ForegroundColor Yellow
             }
 
             # フォルダ内のファイル・サブフォルダの権限も設定（失敗しても処理は継続）
@@ -538,7 +556,8 @@ function Set-RemoteFilePermissions {
             if ($result.IsSuccess) {
                 Write-Host "  ✓ ファイル権限設定完了: $remotePath" -ForegroundColor Green
             } else {
-                Write-Host "  ✗ ファイル権限設定失敗: $remotePath - $($result.ErrorOutput)" -ForegroundColor Yellow
+                $errorDetail = Get-CommandErrorDetail -result $result
+                Write-Host "  ✗ ファイル権限設定失敗: $remotePath - $errorDetail" -ForegroundColor Yellow
             }
         }
     } catch {
