@@ -11,6 +11,7 @@ Sub main()
     Dim localPaths As New Collection
     Dim remotePaths As New Collection
     Dim deleteFlags As New Collection
+    Dim processingModes As New Collection
     
     'ファイルパスシートのセルの値を取得
     filePathRangeValues = getfilePathRangeValues()
@@ -30,11 +31,34 @@ Sub main()
         If i = 2 Then
             Dim emptyColumns As String
             Dim headerName As Variant
+            Dim skipColumn As Boolean
             emptyColumns = ""
             
+            ' 2行目の処理モードを事前に取得
+            Dim firstRowMode As String
+            If filePathRangeHeaderDict.Exists("処理モード") Then
+                firstRowMode = CStr(filePathRangeValues(i, filePathRangeHeaderDict("処理モード")) & "")
+            Else
+                firstRowMode = ""
+            End If
+            
             For Each headerName In filePathRangeHeaderDict.Keys
-                ' 削除フラグのカラムはチェックをスキップ
-                If headerName <> "削除フラグ" Then
+                skipColumn = False
+                
+                ' アップロード時削除フラグ・処理モードのカラムはチェックをスキップ
+                If headerName = "アップロード時削除フラグ" Or headerName = "処理モード" Then
+                    skipColumn = True
+                End If
+                
+                ' 削除のみモードの場合、ローカルパス関連列もスキップ
+                If isDeleteOnlyMode(firstRowMode) Then
+                    If headerName = "ローカルのルートディレクトリのパス" Or _
+                       headerName = "アップロード対象のファイル・フォルダの相対パス" Then
+                        skipColumn = True
+                    End If
+                End If
+                
+                If Not skipColumn Then
                     Dim colIndex As Long
                     colIndex = filePathRangeHeaderDict(headerName)
                     Debug.Print "行" & i & "列" & colIndex & "(" & headerName & ")の値: " & filePathRangeValues(i, colIndex)
@@ -54,16 +78,30 @@ Sub main()
             End If
         End If
         
-        'ローカルパスの処理
-        localRootDirPath = processRootPath(localRootDirPath, filePathRangeValues(i, filePathRangeHeaderDict("ローカルのルートディレクトリのパス")), "¥", i, "ローカル")
-        localPaths.Add buildLocalPath(localRootDirPath, filePathRangeValues(i, filePathRangeHeaderDict("アップロード対象のファイル・フォルダの相対パス")), "アップロード対象のファイル・フォルダの相対パス")
+        '処理モードの読み取り
+        Dim currentMode As String
+        If filePathRangeHeaderDict.Exists("処理モード") Then
+            currentMode = CStr(filePathRangeValues(i, filePathRangeHeaderDict("処理モード")) & "")
+        Else
+            currentMode = ""
+        End If
+        processingModes.Add currentMode
+        
+        If isDeleteOnlyMode(currentMode) Then
+            '削除のみモードではローカルパスは不要
+            localPaths.Add ""
+        Else
+            'ローカルパスの処理
+            localRootDirPath = processRootPath(localRootDirPath, filePathRangeValues(i, filePathRangeHeaderDict("ローカルのルートディレクトリのパス")), "¥", i, "ローカル")
+            localPaths.Add buildLocalPath(localRootDirPath, filePathRangeValues(i, filePathRangeHeaderDict("アップロード対象のファイル・フォルダの相対パス")), "アップロード対象のファイル・フォルダの相対パス")
+        End If
         
         'リモートパスの処理
         remoteRootDirPath = processRootPath(remoteRootDirPath, filePathRangeValues(i, filePathRangeHeaderDict("リモートのルートディレクトリのパス")), "/", i, "リモート")
         remotePaths.Add buildRemotePath(remoteRootDirPath, filePathRangeValues(i, filePathRangeHeaderDict("アップロード先の相対パス")), "アップロードするディレクトリの相対パス")
         
-        '削除フラグの処理
-        deleteFlags.Add convertDeleteFlag(filePathRangeValues(i, filePathRangeHeaderDict("削除フラグ")))
+        'アップロード時削除フラグの処理
+        deleteFlags.Add convertDeleteFlag(filePathRangeValues(i, filePathRangeHeaderDict("アップロード時削除フラグ")))
         
     Next i
     
@@ -207,7 +245,11 @@ Sub main()
     psCommand.Add "    # ファイル処理を実行"
     
     For i = 1 To localPaths.Count
-        psCommand.Add "action " & """" & remotePaths(i) & """" & " " & """" & localPaths(i) & """" & " " & deleteFlags(i) & " $session"
+        If isDeleteOnlyMode(processingModes(i)) Then
+            psCommand.Add "deleteAction " & """" & remotePaths(i) & """" & " $session"
+        Else
+            psCommand.Add "action " & """" & remotePaths(i) & """" & " " & """" & localPaths(i) & """" & " " & deleteFlags(i) & " $session"
+        End If
     Next i
 
     psCommand.Add ""
@@ -293,6 +335,27 @@ Sub main()
     psCommand.Add "                $UploadFailedFiles[$_] | ForEach-Object { Write-Host ""`t$_"" -ForegroundColor Red }"
     psCommand.Add "            }"
     psCommand.Add "        } "
+    psCommand.Add "    } else { "
+    psCommand.Add "        Write-Host ""  なし"" -ForegroundColor Gray "
+    psCommand.Add "    }"
+    psCommand.Add "    Write-Host ""[削除成功]"" -ForegroundColor Green"
+    psCommand.Add "    if ($DeleteSuccess.Count) { "
+    psCommand.Add "        Write-Host ""$($DeleteSuccess.Count)件"""
+    psCommand.Add "        $DeleteSuccess | ForEach-Object { Write-Host ""  $_"" -ForegroundColor Green } "
+    psCommand.Add "    } else { "
+    psCommand.Add "        Write-Host ""  なし"" -ForegroundColor Gray "
+    psCommand.Add "    }"
+    psCommand.Add "    Write-Host ""[削除失敗]"" -ForegroundColor Red"
+    psCommand.Add "    if ($DeleteFailed.Count) { "
+    psCommand.Add "        Write-Host ""$($DeleteFailed.Count)件"""
+    psCommand.Add "        $DeleteFailed | ForEach-Object { Write-Host ""  $_"" -ForegroundColor Red } "
+    psCommand.Add "    } else { "
+    psCommand.Add "        Write-Host ""  なし"" -ForegroundColor Gray "
+    psCommand.Add "    }"
+    psCommand.Add "    Write-Host ""[削除スキップ]"" -ForegroundColor Yellow"
+    psCommand.Add "    if ($DeleteSkipped.Count) { "
+    psCommand.Add "        Write-Host ""$($DeleteSkipped.Count)件"""
+    psCommand.Add "        $DeleteSkipped | ForEach-Object { Write-Host ""  $_"" -ForegroundColor Yellow } "
     psCommand.Add "    } else { "
     psCommand.Add "        Write-Host ""  なし"" -ForegroundColor Gray "
     psCommand.Add "    }"

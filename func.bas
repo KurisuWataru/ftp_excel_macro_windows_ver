@@ -124,9 +124,9 @@ Function buildLocalPath(ByVal rootPath As String, ByVal relativePath As String, 
     End If
 End Function
 
-' 削除フラグをPowerShell形式に変換する
-' @param {String} deleteFlag - 削除フラグ（TRUE/FALSE または True/False）
-' @returns {String} PowerShell形式の削除フラグ（$true または $false）
+' アップロード時削除フラグをPowerShell形式に変換する
+' @param {String} deleteFlag - アップロード時削除フラグ（TRUE/FALSE または True/False）
+' @returns {String} PowerShell形式のアップロード時削除フラグ（$true または $false）
 Function convertDeleteFlag(ByVal deleteFlag As String) As String
     If deleteFlag = "True" Then
         convertDeleteFlag = "$true"
@@ -135,6 +135,13 @@ Function convertDeleteFlag(ByVal deleteFlag As String) As String
     Else
         convertDeleteFlag = "$false"  ' デフォルトは削除しない
     End If
+End Function
+
+' 処理モードが「削除のみ」かどうかを判定する
+' @param {String} modeValue - 処理モード列の値
+' @returns {Boolean} 「削除のみ」の場合 True
+Function isDeleteOnlyMode(ByVal modeValue As String) As Boolean
+    isDeleteOnlyMode = (Trim(modeValue) = "削除のみ")
 End Function
 
 ' リモートパスを組み立てる（Unix形式のパス区切り文字を使用）

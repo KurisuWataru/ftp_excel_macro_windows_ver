@@ -47,6 +47,9 @@ function Initialize-ResultState {
     $script:BackupNotNeeded = @()
     $script:UploadSuccess   = @()
     $script:UploadFailed    = @()
+    $script:DeleteSuccess   = @()
+    $script:DeleteFailed    = @()
+    $script:DeleteSkipped   = @()
 
     # 個別ファイルの結果を記録するための辞書（キーは localBasePath）
     $script:UploadSuccessFiles = @{}
@@ -158,6 +161,21 @@ function action {
     Upload-LocalFile -localPath $localPath -childPath $remoteParentDir -session $session
 }
 
+function deleteAction {
+    <#
+    リモートファイル/フォルダのバックアップ取得後に削除のみ行います（アップロードは行いません）。
+    バックアップは安全のため必ず取得し、削除前にユーザー確認プロンプトを表示します。
+    #>
+    param (
+        [Parameter(Mandatory)][string]$remotePath,
+        [Parameter(Mandatory)][WinSCP.Session]$session
+    )
+
+    $remoteParentDir = Get-RemoteParentDirectory -remotePath $remotePath
+
+    Backup-RemoteFile -remotePath $remotePath -childPath $remoteParentDir -deleteAfterBackup $true -session $session
+}
+
 #endregion メイン処理の入口
 
 #region バックアップ（リモート → ローカル）
@@ -191,12 +209,13 @@ function Backup-RemoteFile {
             $script:BackupSuccess += $remotePath
             Write-Host "バックアップ成功: $remotePath"
 
-            # バックアップ成功後、削除フラグが true の場合は「確認してから」削除します
+            # バックアップ成功後、アップロード時削除フラグが true の場合は「確認してから」削除します
             if ($deleteAfterBackup) {
                 try {
                     $shouldDelete = Read-YesNo -message "バックアップ対象 '$remotePath' を削除しますか？ (yes/no): "
                     if (-not $shouldDelete) {
                         Write-Warn "削除をスキップします。バックアップは完了しました。"
+                        $script:DeleteSkipped += $remotePath
                         return
                     }
 
@@ -207,18 +226,21 @@ function Backup-RemoteFile {
 
                         if ($removalResult.IsSuccess) {
                             if ($fileInfo.IsDirectory) {
-                                Write-Host "フォルダ削除成功: $remotePath" -ForegroundColor Yellow
+                                Write-Host "フォルダ削除完了: $remotePath （検証中...）" -ForegroundColor Yellow
                             } else {
-                                Write-Host "ファイル削除成功: $remotePath" -ForegroundColor Yellow
+                                Write-Host "ファイル削除完了: $remotePath （検証中...）" -ForegroundColor Yellow
                             }
 
                             # 削除結果の検証（存在確認。無ければ例外になる）
+                            # QueryReceived の Continue() により IsSuccess が true でも
+                            # 実際には削除されていない場合があるため、検証結果を最終判定とする
                             try {
                                 $verifyInfo = $session.GetFileInfo($remotePath)
-                                Write-Host "警告: 削除後もファイル/フォルダがまだ存在しています" -ForegroundColor Yellow
+                                Write-Host "エラー: 削除後もファイル/フォルダがまだ存在しています。削除失敗として記録します。" -ForegroundColor Red
+                                $script:DeleteFailed += $remotePath
                             } catch [WinSCP.SessionRemoteException] {
-                                # SessionRemoteExceptionはファイルが存在しないことを意味するので成功
                                 Write-Host "検証: 正常に削除されました" -ForegroundColor Green
+                                $script:DeleteSuccess += $remotePath
                             }
                         } else {
                             # WinSCPのネイティブなエラーメッセージを使用
@@ -240,12 +262,14 @@ function Backup-RemoteFile {
                             }
                             Write-Host "===============================================`n" -ForegroundColor Red
 
+                            $script:DeleteFailed += $remotePath
                             # WinSCPのエラーメッセージをそのまま使用して例外を投げる
                             throw $winscpErrorMessage
                         }
                     } catch [WinSCP.SessionRemoteException] {
                         # ファイルが存在しない場合は成功として扱う
                         Write-Host "対象が存在しないため削除をスキップ: $remotePath" -ForegroundColor Yellow
+                        $script:DeleteSkipped += $remotePath
                     }
                 } catch {
                     # WinSCPのエラーメッセージをそのまま再スロー
@@ -263,6 +287,9 @@ function Backup-RemoteFile {
     } catch [WinSCP.SessionRemoteException] {
         Write-Host "リモートにファイルが存在しないため $remotePath はバックアップを作成しませんでした。"
         $script:BackupNotNeeded += $remotePath
+        if ($deleteAfterBackup) {
+            $script:DeleteSkipped += $remotePath
+        }
     } catch {
         $script:BackupFailed += $remotePath
         # バックアップ処理中のエラーでも処理を中断
@@ -315,11 +342,9 @@ function Upload-LocalFile {
         if ($hasSuccessfulTransfers) {
             Write-Host "アップロード完了。権限を設定中..."
             
-            # アップロード先のリモートパスを計算（chmod 対象）
-            $uploadedRemotePath = Get-UploadedRemotePath -normalizedChildPath $normalizedChildPath -localPath $localPath
-            
-            # 権限設定を実行（エラーがあっても処理を継続）
+            # 権限設定を実行（パス計算・chmod のいずれが失敗しても処理を継続）
             try {
+                $uploadedRemotePath = Get-UploadedRemotePath -normalizedChildPath $normalizedChildPath -localPath $localPath
                 Set-RemoteFilePermissions -remotePath $uploadedRemotePath -session $session
             } catch {
                 Write-Warn "  警告: 権限設定でエラーが発生しましたが、処理を継続します: $_"
@@ -670,13 +695,14 @@ function Get-UploadedRemotePath {
     アップロード先のリモートパス（chmod 対象）を計算します。
     PutFiles() の仕様上、ファイルでもフォルダでも「末尾要素（Leaf）」を childPath 配下に作るため、
     単純に `$normalizedChildPath/$leaf` で統一できます。
+    ルート直下へのアップロード時は $normalizedChildPath が空文字列になるため AllowEmptyString を付与。
     #>
     param(
-        [Parameter(Mandatory)][string]$normalizedChildPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$normalizedChildPath,
         [Parameter(Mandatory)][string]$localPath
     )
     $leaf = Split-Path $localPath -Leaf
-    return ("$normalizedChildPath/$leaf" -replace "//", "/")
+    return ("$normalizedChildPath/$leaf" -replace "//+", "/")
 }
 
 # 失敗ファイルを記録する共通関数
