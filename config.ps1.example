@@ -1,0 +1,7 @@
+$ftpHost = '127.0.0.1'
+$ftpUser = 'localdev'
+$ftpPassword = 'localdev-pass'
+
+$winscpDllPath = 'C:\path\to\WinSCP.NET.dll'
+
+$backupPath = Join-Path $PSScriptRoot 'local-data\backup'
