@@ -88,6 +88,9 @@ $targetEnvironments = @{
 * `ip_check.ps1`: 接続先IP確認用設定ファイル
 * `config.ps1`: 生成される設定ファイル（パスワードが含まれるため、Git管理外にすることをお勧めします）
 * `main_process.ps1`: 生成されるメイン実行スクリプト
+* `docker-compose.yml`: ローカル検証用 FTP サーバーの定義
+* `docker/Dockerfile`: `fauria/vsftpd` をベースに、SSL 設定の追記と自己署名証明書の生成を行うイメージ定義
+* `docker/vsftpd-ssl.conf`: 標準 conf に追記する Explicit FTPS 用の設定
 
 ## ローカル開発環境
 
@@ -101,7 +104,13 @@ $targetEnvironments = @{
 
 ### 1. ローカル FTP サーバーの起動
 
-リポジトリルートで以下を実行します。
+リポジトリルートで以下を実行します。Explicit FTPS 用の設定と自己署名証明書を組み込んだイメージをビルドして起動するため、`--build` を付けます（`docker/Dockerfile` を使用）。
+
+```powershell
+docker compose up -d --build
+```
+
+2 回目以降で `docker/` 配下に変更がなければ `--build` は省略できます。
 
 ```powershell
 docker compose up -d
@@ -124,7 +133,7 @@ docker compose down
 | FTP データディレクトリ | `local-data/ftp-root` |
 | バックアップ保存先 | `local-data/backup` |
 
-`ftp_func.ps1` は `FtpSecure::Explicit` と証明書検証の無効化を使用するため、ローカル FTP は vsftpd + TLS で起動します。パッシブモード用にポート `21100-21110` を公開しています。
+`ftp_func.ps1` は `FtpSecure::Explicit` と証明書検証の無効化を使用するため、ローカル FTP は vsftpd + TLS（Explicit FTPS）で起動します。証明書は `docker/Dockerfile` のビルド時に自己署名で生成され、イメージへ組み込まれます（手動準備は不要）。パッシブモード用にポート `21100-21110` を公開し、パッシブ応答アドレスは `127.0.0.1` を返すよう設定しています。
 
 ### 2. 設定ファイルの準備
 
@@ -155,11 +164,11 @@ $targetEnvironments = @{
 1. Excel マクロの `main` で `main_process.ps1` を生成します。
 2. `main_process.ps1` を PowerShell で実行します。
 
-リポジトリに `FTPコマンド作成マクロ_windows版.xlsm` が含まれていない場合は、GitHub の Releases から取得してください。`config.ps1` は上記の example から手動作成できますが、`main_process.ps1` は Excel マクロの `main` で生成する必要があります。
+`config.ps1` は上記の example から手動作成できますが、`main_process.ps1` は Excel マクロの `main` で生成する必要があります。
 
 ### 4. 手動確認手順
 
-1. `docker compose up -d` でコンテナが起動していることを確認する
+1. `docker compose up -d --build` でコンテナが起動していることを確認する
 2. `config.ps1` と `ip_check.ps1` をローカル向けに準備する
 3. `main_process.ps1` を実行し、「接続が成功しました」が表示されることを確認する
 4. `local-data/ftp-root` にテスト用ファイルを配置し、Excel「ファイルパス」シートでバックアップ取得を実行する
