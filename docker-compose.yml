@@ -1,0 +1,23 @@
+services:
+  local-ftp:
+    build:
+      context: ./docker
+    container_name: local-ftp-server
+    # ローカル開発専用のため loopback のみに公開し、同一ネットワーク上の第三者から
+    # 既知の認証情報でアクセスされないようにする
+    ports:
+      - "127.0.0.1:21:21"
+      - "127.0.0.1:21100-21110:21100-21110"
+    environment:
+      FTP_USER: localdev
+      FTP_PASS: localdev-pass
+      # ホストから 127.0.0.1 で接続するため、パッシブ応答アドレスも 127.0.0.1 に固定
+      # (未指定だと Docker ゲートウェイIPが返り、ホストからパッシブ転送できない)
+      PASV_ADDRESS: 127.0.0.1
+      PASV_MIN_PORT: 21100
+      PASV_MAX_PORT: 21110
+      # ログイン時の逆引きDNSを無効化 (デフォルトYESだとコンテナ内で逆引きが
+      # 約15秒ハングし、WINSCP がタイムアウトしてログインできない)
+      REVERSE_LOOKUP_ENABLE: "NO"
+    volumes:
+      - ./local-data/ftp-root:/home/vsftpd/localdev

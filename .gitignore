@@ -7,9 +7,6 @@ config.ps1
 # 実行スクリプト
 main_process.ps1
 
-# 設定ファイル
-config.ps1
-
 # Excelの一時ファイル
 ~$*.xlsx
 ~$*.xlsm
@@ -17,3 +14,8 @@ config.ps1
 # ログファイル
 display_log.txt
 WinSCP.log
+
+local-data/backup/*
+!local-data/backup/.gitkeep
+local-data/ftp-root/*
+!local-data/ftp-root/.gitkeep

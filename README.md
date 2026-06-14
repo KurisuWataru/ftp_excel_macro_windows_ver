@@ -88,6 +88,121 @@ $targetEnvironments = @{
 * `ip_check.ps1`: 接続先IP確認用設定ファイル
 * `config.ps1`: 生成される設定ファイル（パスワードが含まれるため、Git管理外にすることをお勧めします）
 * `main_process.ps1`: 生成されるメイン実行スクリプト
+* `docker-compose.yml`: ローカル検証用 FTP サーバーの定義
+* `docker/Dockerfile`: `fauria/vsftpd` をベースに、SSL 設定の追記と自己署名証明書の生成を行うイメージ定義
+* `docker/vsftpd-ssl.conf`: 標準 conf に追記する Explicit FTPS 用の設定
+
+## ローカル開発環境
+
+実 FTP サーバーに接続せず、手元の Windows で FTP 接続・バックアップ・アップロードを確認するための手順です。本番向けの `makeConfig` や `ftp_func.ps1` の挙動は変更しません。
+
+### 前提
+
+* Docker Desktop（または Docker CLI）が利用可能であること
+* WinSCP.NET.dll が配置済みであること
+* PowerShell 5.1 以上
+
+### 1. ローカル FTP サーバーの起動
+
+リポジトリルートで以下を実行します。Explicit FTPS 用の設定と自己署名証明書を組み込んだイメージをビルドして起動するため、`--build` を付けます（`docker/Dockerfile` を使用）。
+
+```powershell
+docker compose up -d --build
+```
+
+2 回目以降で `docker/` 配下に変更がなければ `--build` は省略できます。
+
+```powershell
+docker compose up -d
+```
+
+停止する場合:
+
+```powershell
+docker compose down
+```
+
+接続情報（`docker-compose.yml` と `config.ps1.example` と整合）:
+
+| 項目 | 値 |
+| --- | --- |
+| ホスト | `127.0.0.1` |
+| ポート | `21`（Explicit FTPS） |
+| ユーザー名 | `localdev` |
+| パスワード | `localdev-pass` |
+| FTP データディレクトリ（ホスト） | `local-data/ftp-root` |
+| FTP データディレクトリ（コンテナ内） | `/home/vsftpd/localdev` |
+| バックアップ保存先 | `local-data/backup` |
+
+ホストの `local-data/ftp-root` はコンテナ内の `/home/vsftpd/localdev`（FTP ユーザー `localdev` のホーム）にマウントされており、両者は同じ内容を共有します。FTP でアップロードしたファイルはこのディレクトリに格納されます。
+
+`ftp_func.ps1` は `FtpSecure::Explicit` と証明書検証の無効化を使用するため、ローカル FTP は vsftpd + TLS（Explicit FTPS）で起動します。証明書は `docker/Dockerfile` のビルド時に自己署名で生成され、イメージへ組み込まれます（手動準備は不要）。パッシブモード用にポート `21100-21110` を公開し、パッシブ応答アドレスは `127.0.0.1` を返すよう設定しています。
+
+### 2. 設定ファイルの準備
+
+#### `config.ps1`
+
+`config.ps1.example` を `config.ps1` にコピーし、`winscpDllPath` を手元の WinSCP.NET.dll のフルパスに変更します。
+
+```powershell
+Copy-Item config.ps1.example config.ps1
+```
+
+Excel マクロ（`FTPコマンド作成マクロ_windows版.xlsm`）から `makeConfig` で生成しても構いません。その場合は FTP ホスト・ユーザー・パスワード・バックアップ先をローカル向けの値に変更してください。
+
+**注意:** `$ftpHost` は `127.0.0.1` を使用してください。`ip_check.ps1` の `ContainsKey` はホスト名の完全一致で判定するため、`localhost` とは別扱いになります。
+
+#### `ip_check.ps1`
+
+`ip_check.ps1.example` の内容を `ip_check.ps1` に反映し、ローカルホストを開発環境として登録します。
+
+```powershell
+$targetEnvironments = @{
+    "127.0.0.1" = "ローカル開発環境"
+}
+```
+
+### 3. `main_process.ps1` の生成と実行
+
+1. Excel マクロの `main` で `main_process.ps1` を生成します。
+2. `main_process.ps1` を PowerShell で実行します。
+
+`config.ps1` は上記の example から手動作成できますが、`main_process.ps1` は Excel マクロの `main` で生成する必要があります。
+
+### 4. 手動確認手順
+
+1. `docker compose up -d --build` でコンテナが起動していることを確認する
+2. `config.ps1` と `ip_check.ps1` をローカル向けに準備する
+3. `main_process.ps1` を実行し、「接続が成功しました」が表示されることを確認する
+4. `local-data/ftp-root` にテスト用ファイルを配置し、Excel「ファイルパス」シートでバックアップ取得を実行する
+5. ローカルファイルをアップロードし、`local-data/ftp-root` 上に反映されることを確認する
+6. `WinSCP.log` に接続エラーがないことを確認する
+
+ローカル検証で生成された `local-data/backup` および `local-data/ftp-root` 配下のデータは `.gitignore` で除外されます。
+
+### 5. アップロード結果の確認
+
+FTP でアップロードしたファイルは、FTP ユーザー `localdev` のホームディレクトリ（コンテナ内 **`/home/vsftpd/localdev`**）に格納されます。ここはホストの `local-data/ftp-root` にマウントされているため、次のいずれの方法でも確認できます。
+
+* **コンテナ内を直接確認する**
+
+  ```powershell
+  docker exec local-ftp-server ls -la /home/vsftpd/localdev
+  ```
+
+* **ホスト側（マウント先）を確認する**
+
+  ```powershell
+  dir .\local-data\ftp-root\
+  ```
+
+* **FTP クライアントで一覧する**
+
+  ```powershell
+  curl --ftp-ssl --ssl-reqd -k --user localdev:localdev-pass ftp://127.0.0.1/
+  ```
+
+アップロードしたファイルがこれらの一覧に表示されれば成功です。
 
 ## 注意事項
 
