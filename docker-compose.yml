@@ -16,5 +16,8 @@ services:
       PASV_ADDRESS: 127.0.0.1
       PASV_MIN_PORT: 21100
       PASV_MAX_PORT: 21110
+      # ログイン時の逆引きDNSを無効化 (デフォルトYESだとコンテナ内で逆引きが
+      # 約15秒ハングし、WINSCP がタイムアウトしてログインできない)
+      REVERSE_LOOKUP_ENABLE: "NO"
     volumes:
       - ./local-data/ftp-root:/home/vsftpd/localdev

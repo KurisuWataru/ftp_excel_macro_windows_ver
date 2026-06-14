@@ -130,8 +130,11 @@ docker compose down
 | ポート | `21`（Explicit FTPS） |
 | ユーザー名 | `localdev` |
 | パスワード | `localdev-pass` |
-| FTP データディレクトリ | `local-data/ftp-root` |
+| FTP データディレクトリ（ホスト） | `local-data/ftp-root` |
+| FTP データディレクトリ（コンテナ内） | `/home/vsftpd/localdev` |
 | バックアップ保存先 | `local-data/backup` |
+
+ホストの `local-data/ftp-root` はコンテナ内の `/home/vsftpd/localdev`（FTP ユーザー `localdev` のホーム）にマウントされており、両者は同じ内容を共有します。FTP でアップロードしたファイルはこのディレクトリに格納されます。
 
 `ftp_func.ps1` は `FtpSecure::Explicit` と証明書検証の無効化を使用するため、ローカル FTP は vsftpd + TLS（Explicit FTPS）で起動します。証明書は `docker/Dockerfile` のビルド時に自己署名で生成され、イメージへ組み込まれます（手動準備は不要）。パッシブモード用にポート `21100-21110` を公開し、パッシブ応答アドレスは `127.0.0.1` を返すよう設定しています。
 
@@ -176,6 +179,30 @@ $targetEnvironments = @{
 6. `WinSCP.log` に接続エラーがないことを確認する
 
 ローカル検証で生成された `local-data/backup` および `local-data/ftp-root` 配下のデータは `.gitignore` で除外されます。
+
+### 5. アップロード結果の確認
+
+FTP でアップロードしたファイルは、FTP ユーザー `localdev` のホームディレクトリ（コンテナ内 **`/home/vsftpd/localdev`**）に格納されます。ここはホストの `local-data/ftp-root` にマウントされているため、次のいずれの方法でも確認できます。
+
+* **コンテナ内を直接確認する**
+
+  ```powershell
+  docker exec local-ftp-server ls -la /home/vsftpd/localdev
+  ```
+
+* **ホスト側（マウント先）を確認する**
+
+  ```powershell
+  dir .\local-data\ftp-root\
+  ```
+
+* **FTP クライアントで一覧する**
+
+  ```powershell
+  curl --ftp-ssl --ssl-reqd -k --user localdev:localdev-pass ftp://127.0.0.1/
+  ```
+
+アップロードしたファイルがこれらの一覧に表示されれば成功です。
 
 ## 注意事項
 
